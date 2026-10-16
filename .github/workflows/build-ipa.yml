@@ -1,0 +1,59 @@
+
+name: Build HomeTV IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26.3
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Configure build settings
+        run: cp Secrets.example.xcconfig Secrets.xcconfig
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build tvOS app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project HomeTV.xcodeproj \
+            -scheme HomeTV \
+            -sdk appletvos \
+            -destination 'generic/platform=tvOS' \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="build/Build/Products/Release-appletvos/HomeTV.app"
+          test -d "$APP_PATH"
+          mkdir -p package/Payload
+          cp -R "$APP_PATH" package/Payload/
+          cd package
+          zip -qr "$GITHUB_WORKSPACE/HomeTV-unsigned.ipa" Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeTV-unsigned-IPA
+          path: HomeTV-unsigned.ipa
+          retention-days: 7
