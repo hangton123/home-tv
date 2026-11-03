@@ -1,0 +1,98 @@
+
+name: Build HomeTV tvOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build HomeTV for Apple TV
+    runs-on: macos-26
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check Xcode
+        run: |
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Install XcodeGen
+        run: |
+          brew install xcodegen
+          xcodegen --version
+
+      - name: Prepare secrets configuration
+        run: |
+          cp Secrets.example.xcconfig Secrets.xcconfig
+
+      - name: Download KSPlayer and FFmpegKit
+        run: |
+          chmod +x scripts/fetch-player-frameworks.sh
+          ./scripts/fetch-player-frameworks.sh
+
+          echo "Checking downloaded frameworks..."
+          ls -lah Vendor/PlayerFrameworks/
+          test -f Vendor/PlayerFrameworks/VERSION
+
+      - name: Generate Xcode project
+        run: |
+          xcodegen generate
+          test -d HomeTV.xcodeproj
+
+      - name: Archive HomeTV tvOS
+        run: |
+          xcodebuild archive \
+            -project HomeTV.xcodeproj \
+            -scheme HomeTV \
+            -configuration Release \
+            -destination 'generic/platform=tvOS' \
+            -archivePath "$RUNNER_TEMP/HomeTV.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+
+      - name: Verify application and Top Shelf
+        run: |
+          APP="$RUNNER_TEMP/HomeTV.xcarchive/Products/Applications/HomeTV.app"
+
+          test -d "$APP"
+          test -d "$APP/PlugIns/HomeTVTopShelf.appex"
+
+          echo "HomeTV application:"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Info.plist"
+
+          echo "Top Shelf extension verified."
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+
+          APP="$RUNNER_TEMP/HomeTV.xcarchive/Products/Applications/HomeTV.app"
+          IPA_DIR="$RUNNER_TEMP/ipa"
+
+          mkdir -p "$IPA_DIR/Payload"
+          cp -R "$APP" "$IPA_DIR/Payload/"
+
+          cd "$IPA_DIR"
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            Payload \
+            "$GITHUB_WORKSPACE/HomeTV.ipa"
+
+          unzip -t "$GITHUB_WORKSPACE/HomeTV.ipa"
+
+          ls -lh "$GITHUB_WORKSPACE/HomeTV.ipa"
+
+      - name: Upload HomeTV IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeTV-tvOS-IPA
+          path: HomeTV.ipa
+          if-no-files-found: error
+          retention-days: 14
