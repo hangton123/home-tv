@@ -183,6 +183,8 @@ struct Stream: Codable, Hashable, Sendable, Identifiable {
     let fileIdx: Int?
     let sources: [String]?
     let behaviorHints: StreamBehaviorHints?
+    /// Subtitle tracks the add-on attached to this stream; only their languages are read.
+    var subtitles: [StreamSubtitle]? = nil
 
     var id: String {
         if let url { return url }
@@ -220,7 +222,7 @@ struct Stream: Codable, Hashable, Sendable, Identifiable {
 struct StreamBehaviorHints: Codable, Hashable, Sendable {
     let bingeGroup: String?
     let notWebReady: Bool?
-    let proxyHeaders: [String: String]?
+    let proxyHeaders: StreamProxyHeaders?
     /// The file's own name, which add-ons keep stable across launches while the URL changes.
     var filename: String? = nil
 }

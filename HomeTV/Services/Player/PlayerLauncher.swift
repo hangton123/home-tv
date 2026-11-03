@@ -3,12 +3,14 @@ import UIKit
 
 enum PlayerLaunchError: Error, LocalizedError {
     case noPlayableURL
+    case unsupportedInApp
     case playerUnavailable(ExternalPlayer)
     case failedToOpen
 
     var errorDescription: String? {
         switch self {
         case .noPlayableURL: "This stream has no playable URL."
+        case .unsupportedInApp: "This stream can't play in HomeTV. Choose a direct stream, or switch players in Settings."
         case .playerUnavailable(let p): "\(p.displayName) is not installed on this Apple TV."
         case .failedToOpen: "Failed to hand off to the external player."
         }
@@ -64,9 +66,10 @@ enum PlayerLauncher {
         )
     }
 
-    /// Seconds to resume at, or nil to start from the beginning. Only a fraction inside
-    /// `LocalLibrary.resumeRange` resumes, and an unknown runtime never guesses.
-    static func resumePosition(fraction: Double?, runtimeSeconds: Int?) -> Int? {
+    /// Seconds to resume at, or nil to start from the beginning. Saved seconds win; otherwise only a
+    /// fraction inside `LocalLibrary.resumeRange` resumes, and an unknown runtime never guesses.
+    static func resumePosition(savedSeconds: Int? = nil, fraction: Double?, runtimeSeconds: Int?) -> Int? {
+        if let savedSeconds, savedSeconds > 0 { return savedSeconds }
         guard let fraction, LocalLibrary.resumeRange.contains(fraction),
               let runtimeSeconds, runtimeSeconds > 0 else { return nil }
         let seconds = Int(fraction * Double(runtimeSeconds))
@@ -129,6 +132,9 @@ enum PlayerLauncher {
             return vlcURL(media: mediaURL)
         case .system:
             return mediaURL
+        // Plays in-app through `PlayerPresenter`; there's no app to hand a URL to.
+        case .builtIn:
+            return nil
         }
     }
 

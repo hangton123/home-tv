@@ -24,6 +24,26 @@ struct HomeTVApp: App {
                 // If a Trakt session is restored from the Keychain, validate it and warm the
                 // watched/watchlist/playback caches so the views have data on first paint.
                 .task { await TraktService.shared.bootstrap() }
+                #if DEBUG
+                // Opens the in-app player on a URL at launch, for checking playback without the UI.
+                // `PLAYER_TEST_ID` (a content id) saves and resumes the position like a real title.
+                .task {
+                    let environment = ProcessInfo.processInfo.environment
+                    guard let raw = environment["PLAYER_TEST_URL"], let url = URL(string: raw) else { return }
+                    let contentID = environment["PLAYER_TEST_ID"]
+                    let resume = contentID.flatMap(UserLibrary.resumeSeconds(forKey:)) ?? 0
+                    PlayerPresenter.shared.present(PlayerRequest(
+                        url: url,
+                        title: environment["PLAYER_TEST_TITLE"] ?? "",
+                        episodeLabel: environment["PLAYER_TEST_EPISODE"],
+                        logoURL: environment["PLAYER_TEST_LOGO"].flatMap(URL.init(string:)),
+                        startTime: TimeInterval(resume),
+                        item: contentID.map {
+                            PlaybackItem(contentID: $0, showID: PlaybackSession.showID(fromEpisodeID: $0))
+                        }
+                    ))
+                }
+                #endif
                 // Returning to HomeTV re-syncs the watched/watchlist/playback caches. Playback hands off
                 // to an external player (Infuse/VLC), which backgrounds us and scrobbles to Trakt; coming
                 // back re-activates the scene, so this is where a title just finished elsewhere becomes
