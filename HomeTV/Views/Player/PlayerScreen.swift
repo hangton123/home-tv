@@ -11,7 +11,8 @@ struct PlayerScreen: View {
     @Environment(\.scenePhase) private var scenePhase
 
     init(request: PlayerRequest) {
-        _model = State(initialValue: PlayerModel(request: request))
+        // The stream picker may have opened this stream already, on focus.
+        _model = State(initialValue: PlayerPrewarmer.shared.take(for: request) ?? PlayerModel(request: request))
     }
 
     var body: some View {
@@ -29,6 +30,12 @@ struct PlayerScreen: View {
             }
             // Only one focus layer is mounted at a time: overlapping full-screen focusables break
             // directional navigation. Keeping the bar mounted at zero opacity drops far more frames.
+            if model.subtitlesMenu == .style, let appearance = model.subtitles.appearance {
+                SubtitleStylePreview(appearance: appearance)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                    .padding(.top, 182)
+                    .transition(.opacity)
+            }
             if model.bar.isVisible {
                 PlayerTransportBar(model: model, focus: $focus, onSelect: select, onMove: move)
                     .padding(.horizontal, 80)
@@ -45,6 +52,9 @@ struct PlayerScreen: View {
         .ignoresSafeArea()
         .animation(.easeInOut(duration: 0.3), value: model.state)
         .animation(.easeInOut(duration: 0.3), value: model.bar.isVisible)
+        .animation(.easeInOut(duration: 0.2), value: model.subtitlesMenu == nil)
+        .animation(.easeInOut(duration: 0.2), value: model.isAudioMenuOpen)
+        .animation(.easeInOut(duration: 0.3), value: model.panel)
         // The app is light; over black video the loader, text and glass need the dark appearance.
         .environment(\.colorScheme, .dark)
         .onExitCommand {
@@ -72,11 +82,21 @@ struct PlayerScreen: View {
         .onChange(of: model.bar.isVisible) { _, visible in
             focus = visible ? .scrubber : .surface
         }
-        .onChange(of: focus) {
-            model.noteActivity()
+        .onChange(of: model.subtitlesMenu == nil) { _, isClosed in
+            if isClosed, model.bar.isVisible { focus = .subtitles }
+        }
+        .onChange(of: model.isAudioMenuOpen) { _, isOpen in
+            if !isOpen, model.bar.isVisible { focus = .audio }
+        }
+        .onChange(of: model.panel) { _, panel in
+            // Menu or Up closed the panel from inside it.
+            if panel == nil, model.bar.isVisible, focus?.panel != nil { focus = .scrubber }
+        }
+        .onChange(of: focus) { _, target in
+            model.focusDidChange(to: target)
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { model.saveProgress() }
+            model.sceneDidChange(isActive: phase == .active)
         }
         .task(id: model.isPlaying) {
             // Keeps Control Center's clock in step; it extrapolates between updates.
@@ -104,8 +124,15 @@ struct PlayerScreen: View {
         }
     }
 
-    /// The round buttons' menus and the tabs' panels arrive in #98–#108.
     private func select(_ target: PlayerFocus) {
-        model.noteActivity()
+        switch target {
+        case .subtitles: model.openSubtitlesMenu()
+        case .audio: model.openAudioMenu()
+        case .fromBeginning: model.playFromBeginning()
+        case .goToDetail:
+            guard let detail = model.detail else { return }
+            model.goToDetail(detail)
+        default: model.noteActivity()
+        }
     }
 }
