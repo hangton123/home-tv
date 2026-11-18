@@ -17,11 +17,21 @@ final class KSPlaybackEngine: PlaybackEngine {
     var subtitleDelay: TimeInterval = 0 {
         didSet { layer?.subtitleModel.subtitleDelay = subtitleDelay }
     }
+    var externalSubtitles: [ExternalSubtitle] = [] {
+        didSet {
+            // Not auto-downloaded: KSPlayer fetches a file the first time it's selected.
+            externalInfos = externalSubtitles.map {
+                URLSubtitleInfo(subtitleID: $0.url.absoluteString, name: "", url: $0.url, languageCode: $0.languageCode)
+            }
+        }
+    }
     @ObservationIgnored var onFinish: ((Error?) -> Void)?
     @ObservationIgnored var onTracksReady: (() -> Void)?
     @ObservationIgnored var audioPicker: (@Sendable ([PlaybackTrack]) -> PlaybackTrack?)?
 
     @ObservationIgnored private var layer: KSPlayerLayer?
+    /// Kept across decoder restarts, so a fetched file isn't fetched again.
+    @ObservationIgnored private var externalInfos: [URLSubtitleInfo] = []
     @ObservationIgnored private var options: KSPlaybackOptions?
     /// The layer's own accurate-seek setting, which an audio switch overrides until the next seek.
     @ObservationIgnored private var seeksAccurately = false
@@ -46,12 +56,34 @@ final class KSPlaybackEngine: PlaybackEngine {
     @ObservationIgnored private var resolveTask: Task<Void, Never>?
     /// First-frame timing for the debug log.
     @ObservationIgnored private var hasReportedFirstFrame = false
+    /// Watches for the audio hardware changing under the FFmpeg route's `AVAudioEngine`.
+    @ObservationIgnored private var audioConfigurationTask: Task<Void, Never>?
 
     init() {
         videoView.backgroundColor = .black
         Self.configureSubtitles()
         displaySwitch.onStart = { [weak self] in self?.holdForDisplaySwitch() }
         displaySwitch.onEnd = { [weak self] in self?.releaseDisplaySwitchHold() }
+        audioConfigurationTask = Task { [weak self] in
+            // Mapped to a `Sendable` id first: `Notification` can't cross into the main actor.
+            let engines = NotificationCenter.default.notifications(named: .AVAudioEngineConfigurationChange)
+                .compactMap { ($0.object as? AVAudioEngine).map(ObjectIdentifier.init) }
+            for await engine in engines {
+                self?.audioConfigurationDidChange(engine: engine)
+            }
+        }
+    }
+
+    /// A configuration change stops every `AVAudioEngine`, and KSPlayer doesn't start its own again: the
+    /// stream plays on silently with a stalled clock. Up Next's hand-over causes one when the previous
+    /// episode's player shuts down; so can the TV changing mode.
+    private func audioConfigurationDidChange(engine: ObjectIdentifier) {
+        guard let player = layer?.player as? KSMEPlayer,
+              let output = player.audioOutput as? AudioEnginePlayer,
+              engine == ObjectIdentifier(output.engine),
+              !output.engine.isRunning, state == .playing else { return }
+        PlaybackDiagnostics.log("audio engine stopped by a configuration change, restarting")
+        output.play()
     }
 
     /// Text subtitles take the system caption style. ASS draws through libass, keeping its own styling.
@@ -141,6 +173,7 @@ final class KSPlaybackEngine: PlaybackEngine {
         )
         let layer = KSPlayerLayer(url: url, options: options, delegate: self)
         self.layer = layer
+        layer.subtitleModel.subtitleDelay = subtitleDelay
         // Without autoplay the layer doesn't load on its own.
         if !options.isAutoPlay { layer.prepareToPlay() }
         let surface = layer.makeUIView()
@@ -180,12 +213,12 @@ final class KSPlaybackEngine: PlaybackEngine {
         layer?.pause()
     }
 
-    func seek(to time: TimeInterval) {
+    func seek(to time: TimeInterval, isAccurate: Bool) {
         guard let layer else { return }
         seekGeneration += 1
         let generation = seekGeneration
         isSeeking = true
-        options?.isAccurateSeek = seeksAccurately
+        options?.isAccurateSeek = seeksAccurately || isAccurate
         layer.seek(time: time, autoPlay: state != .paused) { [weak self] _ in
             guard let self, generation == seekGeneration else { return }
             isSeeking = false
@@ -194,7 +227,12 @@ final class KSPlaybackEngine: PlaybackEngine {
 
     func tracks(of kind: PlaybackTrack.Kind) -> [PlaybackTrack] {
         guard let player = layer?.player else { return [] }
-        if kind == .subtitle { return player.subtitlesTracks.map(Self.subtitleTrack) }
+        if kind == .subtitle {
+            let external = externalSubtitles.enumerated().map { index, subtitle in
+                subtitle.track(at: index, isSelected: externalInfos[index].isSelected)
+            }
+            return player.subtitlesTracks.map(Self.subtitleTrack) + external
+        }
         if kind == .audio { return player.tracks(mediaType: .audio).map { Self.audioTrack($0) } }
         return player.tracks(mediaType: kind.mediaType).map { track in
             PlaybackTrack(
@@ -234,8 +272,24 @@ final class KSPlaybackEngine: PlaybackEngine {
 
     func selectSubtitle(_ track: PlaybackTrack?) {
         guard let layer else { return }
-        let info = track.flatMap { track in layer.player.subtitlesTracks.first { Self.trackID($0) == track.id } }
+        let info: (any SubtitleInfo)? = track.flatMap { track in
+            if let index = ExternalSubtitle.index(of: track) {
+                return externalInfos.indices.contains(index) ? externalInfos[index] : nil
+            }
+            return layer.player.subtitlesTracks.first { Self.trackID($0) == track.id }
+        }
         layer.select(subtitleInfo: info)
+    }
+
+    /// FFmpeg lists the file's chapters. When the route lists none, an AVPlayer start's are read from its asset.
+    func loadChapters() async -> [PlaybackChapter] {
+        guard let player = layer?.player else { return [] }
+        let chapters = player.chapters
+        if !chapters.isEmpty {
+            return chapters.map { PlaybackChapter(start: $0.start, end: $0.end, title: $0.title) }
+        }
+        guard let asset = (player.view as? KSAVPlayerView)?.player.currentItem?.asset else { return [] }
+        return await PlaybackChapter.load(from: asset)
     }
 
     private static func subtitleTrack(_ info: any SubtitleInfo) -> PlaybackTrack {
@@ -324,6 +378,8 @@ final class KSPlaybackEngine: PlaybackEngine {
     }
 
     func stop() {
+        audioConfigurationTask?.cancel()
+        audioConfigurationTask = nil
         resolveTask?.cancel()
         resolveTask = nil
         onFinish = nil
@@ -366,6 +422,7 @@ extension KSPlaybackEngine: KSPlayerLayerDelegate {
             layer.play()
         }
         if state == .readyToPlay {
+            externalInfos.forEach(layer.subtitleModel.addSubtitle(info:))
             // A turn later, so the layer has finished its own ready handling and listed the tracks.
             Task { @MainActor [weak self] in self?.onTracksReady?() }
         }

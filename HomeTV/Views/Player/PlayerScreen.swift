@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// The in-app player: video full screen over black, with the system-style transport bar. Click and
-/// Play/Pause toggle playback, Left/Right skip, a swipe scrubs while paused, and Menu hides the bar before
-/// closing.
+/// Play/Pause toggle playback, Left/Right skip or, held, scan, a swipe scrubs while paused, and Menu hides
+/// the bar before closing.
 struct PlayerScreen: View {
     @State private var model: PlayerModel
     @State private var swipes = RemoteSwipeTracker()
@@ -16,10 +16,17 @@ struct PlayerScreen: View {
     }
 
     var body: some View {
+        // Up Next waits while the bar is up, so it never takes the screen from under the viewer.
+        let showsUpNext = model.isShowingUpNext && !model.bar.isVisible
         ZStack {
             Color.black
+            if showsUpNext, let upNext = model.upNext {
+                UpNextBackdrop(url: upNext.thumbnailURL)
+                    .transition(.opacity)
+            }
             PlayerVideoSurface(videoView: model.videoView)
-            if model.errorMessage == nil, model.state == .loading || model.state == .buffering {
+                .upNextVideoFrame(isCornered: showsUpNext, isFocused: showsUpNext && focus == .upNextVideo)
+            if model.errorMessage == nil, !showsUpNext, model.showsLoadingScreen {
                 PlayerLoadingView(title: model.request.title, logoURL: model.request.logoURL)
                     .transition(.opacity)
             }
@@ -41,6 +48,16 @@ struct PlayerScreen: View {
                     .padding(.horizontal, 80)
                     .padding(.bottom, 46)
                     .transition(.opacity)
+            } else if showsUpNext, let upNext = model.upNext {
+                UpNextDetails(model: model, episode: upNext, focus: $focus)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                    .padding(.leading, 80)
+                    .padding(.bottom, 68)
+                    .transition(.opacity)
+                UpNextVideoButton(model: model, focus: $focus)
+            } else if let segment = model.skipSegment {
+                PlayerSkipButton(segment: segment, focus: $focus, action: model.skipCurrentSegment)
+                    .transition(.opacity)
             } else {
                 // The hidden bar's stand-in, so the focus engine always has a control and Select works.
                 Button(action: model.togglePlayPause) { Color.clear }
@@ -49,23 +66,29 @@ struct PlayerScreen: View {
                     .onMoveCommand(perform: move)
             }
         }
+        .background {
+            RemoteArrowObserver(onPress: arrowPressed, onClick: model.arrowClicked, onHold: model.arrowHeld)
+        }
         .ignoresSafeArea()
         .animation(.easeInOut(duration: 0.3), value: model.state)
         .animation(.easeInOut(duration: 0.3), value: model.bar.isVisible)
         .animation(.easeInOut(duration: 0.2), value: model.subtitlesMenu == nil)
         .animation(.easeInOut(duration: 0.2), value: model.isAudioMenuOpen)
         .animation(.easeInOut(duration: 0.3), value: model.panel)
+        .animation(.easeInOut(duration: 0.5), value: showsUpNext)
+        .animation(.easeOut(duration: 0.2), value: focus == .upNextVideo)
+        .animation(.easeInOut(duration: 0.3), value: model.skipSegment)
         // The app is light; over black video the loader, text and glass need the dark appearance.
         .environment(\.colorScheme, .dark)
         .onExitCommand {
             if !model.handleExit() { dismiss() }
         }
-        .onPlayPauseCommand { model.togglePlayPause() }
+        .onPlayPauseCommand { model.playPauseCommand() }
         .onAppear {
             model.start()
-            swipes.onSwipe = { fraction in
+            swipes.onSwipe = { fraction, speed in
                 guard focus == .scrubber else { return }
-                model.scrub(byPadFraction: fraction)
+                model.scrub(byPadFraction: fraction, speed: speed)
             }
             swipes.start()
         }
@@ -74,13 +97,27 @@ struct PlayerScreen: View {
             model.stop()
         }
         .onChange(of: model.didFinish) { _, finished in
-            if finished { dismiss() }
+            guard finished else { return }
+            // Up Next swaps the next episode in place; its stream is already open.
+            if let next = model.nextRequest {
+                PlayerPresenter.shared.present(next)
+            } else {
+                dismiss()
+            }
         }
         .onChange(of: model.state) {
             model.playbackDidChange()
         }
         .onChange(of: model.bar.isVisible) { _, visible in
-            focus = visible ? .scrubber : .surface
+            focus = visible ? .scrubber : hiddenBarFocus
+        }
+        .onChange(of: model.isShowingUpNext) {
+            guard !model.bar.isVisible else { return }
+            focus = hiddenBarFocus
+        }
+        .onChange(of: model.skipSegment != nil) {
+            guard !model.bar.isVisible, !model.isShowingUpNext else { return }
+            focus = hiddenBarFocus
         }
         .onChange(of: model.subtitlesMenu == nil) { _, isClosed in
             if isClosed, model.bar.isVisible { focus = .subtitles }
@@ -111,17 +148,30 @@ struct PlayerScreen: View {
                 model.saveProgress()
             }
         }
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                model.tickSkip()
+                model.tickUpNext()
+            }
+        }
     }
 
+    /// What takes focus while the bar is hidden: Up Next, else the Skip button, else the bar's stand-in.
+    private var hiddenBarFocus: PlayerFocus {
+        if model.isShowingUpNext { return .upNextNextEpisode }
+        return model.skipSegment != nil ? .skipSegment : .surface
+    }
+
+    /// Left/Right clicks and holds come from `RemoteArrowObserver`; a swipe's moves only show the bar.
     private func move(_ direction: MoveCommandDirection) {
-        switch direction {
-        case .left, .right:
-            // A swipe while paused scrubs; only a press on the pad's edge skips.
-            if model.state == .paused, swipes.isSwiping { return }
-            model.skip(by: direction == .left ? -PlayerModel.skipInterval : PlayerModel.skipInterval)
-        default:
-            model.bar.show(isPlaying: model.isPlaying)
-        }
+        model.bar.show(isPlaying: model.isPlaying)
+    }
+
+    /// Left/Right skip and scan on the track, or on the hidden bar; elsewhere they only move focus.
+    private func arrowPressed(_ side: PlayerScan.Direction) -> Bool {
+        guard focus == .scrubber || focus == .surface else { return true }
+        return model.arrowPressed(side)
     }
 
     private func select(_ target: PlayerFocus) {

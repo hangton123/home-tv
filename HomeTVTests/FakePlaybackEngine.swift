@@ -10,6 +10,7 @@ final class FakePlaybackEngine: PlaybackEngine {
     var currentTime: TimeInterval = 0
     var duration: TimeInterval = 0
     var subtitleDelay: TimeInterval = 0
+    var externalSubtitles: [ExternalSubtitle] = []
     var videoFormat: VideoFormat?
     var onFinish: ((Error?) -> Void)?
     var onTracksReady: (() -> Void)?
@@ -33,21 +34,27 @@ final class FakePlaybackEngine: PlaybackEngine {
     func play() { state = .playing }
     func pause() { state = .paused }
 
-    func seek(to time: TimeInterval) {
+    /// The seeks that asked to land exactly.
+    private(set) var accurateSeeks: [TimeInterval] = []
+
+    func seek(to time: TimeInterval, isAccurate: Bool) {
         seeks.append(time)
+        if isAccurate { accurateSeeks.append(time) }
         if seekLands { currentTime = time }
     }
 
     func tracks(of kind: PlaybackTrack.Kind) -> [PlaybackTrack] {
         switch kind {
         case .audio: audioTracks
-        case .subtitle: subtitleTracks
+        case .subtitle: subtitleTracks + externalSubtitles.enumerated().map { $1.track(at: $0, isSelected: false) }
         case .video: []
         }
     }
 
     func select(_ track: PlaybackTrack) { selections.append(track) }
     func selectSubtitle(_ track: PlaybackTrack?) { subtitleSelections.append(track) }
+    var chapters: [PlaybackChapter] = []
+    func loadChapters() async -> [PlaybackChapter] { chapters }
     private(set) var isStopped = false
     func stop() { isStopped = true }
 }

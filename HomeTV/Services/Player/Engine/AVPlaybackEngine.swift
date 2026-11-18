@@ -12,6 +12,8 @@ final class AVPlaybackEngine: PlaybackEngine {
     private(set) var currentTime: TimeInterval = 0
     private(set) var duration: TimeInterval = 0
     var subtitleDelay: TimeInterval = 0
+    /// Listed so the menu can be checked, but AVPlayer can't show them.
+    var externalSubtitles: [ExternalSubtitle] = []
     @ObservationIgnored private(set) var videoFormat: VideoFormat?
     @ObservationIgnored var onFinish: ((Error?) -> Void)?
     @ObservationIgnored var onTracksReady: (() -> Void)?
@@ -64,12 +66,15 @@ final class AVPlaybackEngine: PlaybackEngine {
 
     func pause() { player.pause() }
 
-    func seek(to time: TimeInterval) {
+    func seek(to time: TimeInterval, isAccurate: Bool) {
         seekGeneration += 1
         let generation = seekGeneration
         isSeeking = true
         Task { [weak self, player] in
-            await player.seek(to: CMTime(seconds: time, preferredTimescale: 600))
+            let tolerance: CMTime = isAccurate ? .zero : .positiveInfinity
+            await player.seek(
+                to: CMTime(seconds: time, preferredTimescale: 600), toleranceBefore: tolerance, toleranceAfter: tolerance
+            )
             guard let self, generation == seekGeneration else { return }
             isSeeking = false
         }
@@ -77,6 +82,13 @@ final class AVPlaybackEngine: PlaybackEngine {
 
     /// Track ids are the option's index in its selection group.
     func tracks(of kind: PlaybackTrack.Kind) -> [PlaybackTrack] {
+        let external = kind == .subtitle
+            ? externalSubtitles.enumerated().map { $1.track(at: $0, isSelected: false) }
+            : []
+        return groupTracks(of: kind) + external
+    }
+
+    private func groupTracks(of kind: PlaybackTrack.Kind) -> [PlaybackTrack] {
         guard let item = player.currentItem, let group = group(for: kind) else { return [] }
         let selected = item.currentMediaSelection.selectedMediaOption(in: group)
         return group.options.enumerated().map { index, option in
@@ -101,7 +113,7 @@ final class AVPlaybackEngine: PlaybackEngine {
     }
 
     func selectSubtitle(_ track: PlaybackTrack?) {
-        guard let track else {
+        guard let track, !track.isExternal else {
             if let legible { player.currentItem?.select(nil, in: legible) }
             return
         }
@@ -114,6 +126,11 @@ final class AVPlaybackEngine: PlaybackEngine {
         case .subtitle: legible
         case .video: nil
         }
+    }
+
+    func loadChapters() async -> [PlaybackChapter] {
+        guard let asset = player.currentItem?.asset else { return [] }
+        return await PlaybackChapter.load(from: asset)
     }
 
     func stop() {

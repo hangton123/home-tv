@@ -15,6 +15,9 @@ protocol PlaybackEngine: AnyObject {
     var videoFormat: VideoFormat? { get }
     /// Seconds subtitles are shifted by. Positive shows them later.
     var subtitleDelay: TimeInterval { get set }
+    /// Add-on subtitle files, listed by `tracks(of: .subtitle)` after the stream's own. Set before
+    /// `prepare` or `load`; a file is fetched only once it's selected.
+    var externalSubtitles: [ExternalSubtitle] { get set }
     /// Called once when playback ends, with the error if it failed.
     var onFinish: ((Error?) -> Void)? { get set }
     /// Called each time the stream's tracks become known, including after a decoder restart.
@@ -28,11 +31,20 @@ protocol PlaybackEngine: AnyObject {
     func load(url: URL, headers: [String: String], startTime: TimeInterval)
     func play()
     func pause()
-    func seek(to time: TimeInterval)
+    /// Lands on `time` exactly when `isAccurate`, else on a nearby keyframe, which is faster.
+    func seek(to time: TimeInterval, isAccurate: Bool)
     func tracks(of kind: PlaybackTrack.Kind) -> [PlaybackTrack]
     func select(_ track: PlaybackTrack)
     /// Shows `track`'s subtitles, or none for nil.
     func selectSubtitle(_ track: PlaybackTrack?)
+    /// The file's chapters, once `onTracksReady` has fired; empty when it has none.
+    func loadChapters() async -> [PlaybackChapter]
     /// Stops playback and releases the decoder. The engine can't be reused.
     func stop()
+}
+
+extension PlaybackEngine {
+    func seek(to time: TimeInterval) {
+        seek(to: time, isAccurate: false)
+    }
 }
